@@ -12,6 +12,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.localStartPath) private var localStartPath = ""
     @AppStorage(SettingsKey.showHiddenFiles) private var showHidden = false
     @AppStorage(SettingsKey.editorAppPath) private var editorAppPath = ""
+    @AppStorage(SettingsKey.preferredIDE) private var preferredIDE = ""
 
     var body: some View {
         Form {
@@ -69,6 +70,28 @@ struct SettingsView: View {
                     }
                 }
             }
+            Section("IDE") {
+                Picker("開啟目前資料夾的 IDE", selection: $preferredIDE) {
+                    Text("自動（Cursor、VS Code、VS Code Insiders 依序）").tag("")
+                    ForEach(IDEKind.allCases) { kind in
+                        Text(installedIDEs.contains { $0.kind == kind } ? kind.name : "\(kind.name)（未安裝）").tag(kind.rawValue)
+                    }
+                }
+                LabeledContent("目前使用") {
+                    if let ide = IDELauncher.detect() {
+                        Text("\(ide.name)  \(ide.cliPath)")
+                            .font(.caption)
+                            .textSelection(.enabled)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    } else {
+                        Text("找不到").foregroundStyle(.red)
+                    }
+                }
+                Text("本機面板直接開啟資料夾；遠端面板以 vscode-remote://ssh-remote+主機/路徑 開啟，需先在該 IDE 安裝 Remote - SSH 擴充功能。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("關於") {
                 Text("所有操作都以 ssh / rsync / tar 等指令完成，可在「指令紀錄」面板查看實際執行的指令。ssh 連線使用 ControlMaster 多工，只需驗證一次。")
                     .font(.caption)
@@ -78,6 +101,8 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 540)
     }
+
+    private var installedIDEs: [IDELauncher.IDE] { IDELauncher.installedIDEs() }
 
     private func pickEditor() {
         let panel = NSOpenPanel()

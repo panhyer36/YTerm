@@ -19,7 +19,7 @@ macOS 雙欄 ssh／rsync 檔案管理程式（SwiftUI）。左本機、右遠端
 - 遠端檔案本機編輯，儲存後自動上傳，保留權限與擁有者
 - 自動同步：FSEvents 監看本機資料夾，變動後 rsync 推送（可鏡像、排除）；「檢查遠端變更」以試跑列出差異並勾選下載
 - 書籤與最近位置；主機資源（負載、記憶體、磁碟、GPU、程序）
-- 執行單行指令、Terminal.app、Cursor（Remote-SSH）
+- 執行單行指令、Terminal.app、Cursor／VS Code（Remote-SSH，可在設定選擇）
 
 | 指令紀錄 | 主機資源 |
 | --- | --- |

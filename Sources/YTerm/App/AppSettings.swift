@@ -9,6 +9,7 @@ enum SettingsKey {
     static let localStartPath = "localStartPath"
     static let showHiddenFiles = "showHiddenFiles"
     static let editorAppPath = "editorAppPath"
+    static let preferredIDE = "preferredIDE"
 }
 
 enum AppSettings {
@@ -30,6 +31,8 @@ enum AppSettings {
     static var showHiddenFiles: Bool { defaults.bool(forKey: SettingsKey.showHiddenFiles) }
     static var localStartPath: String { defaults.string(forKey: SettingsKey.localStartPath) ?? "" }
     static var editorAppPath: String { defaults.string(forKey: SettingsKey.editorAppPath) ?? "" }
+    /// nil = automatic (first installed editor).
+    static var preferredIDE: IDEKind? { IDEKind(rawValue: defaults.string(forKey: SettingsKey.preferredIDE) ?? "") }
 
     static var maxConcurrentTransfers: Int {
         let value = defaults.integer(forKey: SettingsKey.maxConcurrentTransfers)

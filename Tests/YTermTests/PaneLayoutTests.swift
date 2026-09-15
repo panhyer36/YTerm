@@ -54,4 +54,18 @@ final class IDELauncherTests: XCTestCase {
         alias.host = "lab-alias"
         XCTAssertEqual(IDELauncher.remoteFolderURI(profile: alias, path: "/srv"), "vscode-remote://ssh-remote+lab-alias/srv")
     }
+
+    func testDetectHonoursPreferredIDE() {
+        let code = "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+        let cursor = "/Applications/Cursor.app/Contents/Resources/app/bin/cursor"
+        let both: IDELauncher.ExecutableCheck = { $0 == code || $0 == cursor }
+        XCTAssertEqual(IDELauncher.detect(preferred: nil, isExecutable: both)?.kind, .cursor)
+        XCTAssertEqual(IDELauncher.detect(preferred: .vscode, isExecutable: both), .init(kind: .vscode, cliPath: code))
+        XCTAssertEqual(IDELauncher.installedIDEs(isExecutable: both).map(\.kind), [.cursor, .vscode])
+
+        let onlyCodeSymlink: IDELauncher.ExecutableCheck = { $0 == "/opt/homebrew/bin/code" }
+        XCTAssertEqual(IDELauncher.detect(preferred: nil, isExecutable: onlyCodeSymlink)?.cliPath, "/opt/homebrew/bin/code")
+        XCTAssertNil(IDELauncher.detect(preferred: .cursor, isExecutable: onlyCodeSymlink))
+        XCTAssertNil(IDELauncher.detect(preferred: .vscodeInsiders, isExecutable: { _ in false }))
+    }
 }
