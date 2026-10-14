@@ -200,6 +200,105 @@ struct PasswordPromptView: View {
     }
 }
 
+struct InotifyCredentialsSheet: View {
+    enum Account: Hashable {
+        case current
+        case other
+    }
+
+    @Environment(AppState.self) private var app
+    @Environment(\.dismiss) private var dismiss
+    let request: InotifyCredentialRequest
+    @State private var account: Account
+    @State private var otherUser = "root"
+    @State private var password = ""
+    @State private var submitted = false
+
+    init(request: InotifyCredentialRequest) {
+        self.request = request
+        _account = State(initialValue: request.allowCurrentAccount && !request.preferOtherAccount ? .current : .other)
+    }
+
+    private var profile: HostProfile? { app.profiles.profile(id: request.profileID) }
+    private var currentUser: String { app.connections[request.profileID]?.info.userName ?? "目前帳號" }
+    private var loginPassword: String? { KeychainStore.load(account: request.profileID.uuidString) }
+    private var canSubmit: Bool {
+        !password.isEmpty && (account == .current || !otherUser.trimmingCharacters(in: .whitespaces).isEmpty)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("在「\(profile?.displayName ?? "主機")」安裝 inotify-tools")
+                .font(.headline)
+            Text("安裝需要 root 權限。帳號與密碼只用於這次安裝，不會儲存。")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let message = request.message {
+                Text(message)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Picker("", selection: $account) {
+                Text("目前帳號（\(currentUser)）").tag(Account.current)
+                Text("其他有 root 權限的帳號").tag(Account.other)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(!request.allowCurrentAccount)
+            switch account {
+            case .current:
+                SecureField("\(currentUser) 的 sudo 密碼", text: $password)
+                    .textFieldStyle(.roundedBorder)
+            case .other:
+                TextField("帳號", text: $otherUser, prompt: Text("root 或有 sudo 權限的帳號"))
+                    .textFieldStyle(.roundedBorder)
+                SecureField("密碼", text: $password)
+                    .textFieldStyle(.roundedBorder)
+                Text("會用這個帳號另外登入同一台主機來安裝；不是 root 時用同一組密碼執行 sudo。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                if account == .current, loginPassword != nil {
+                    Button("使用登入密碼") {
+                        password = loginPassword ?? ""
+                        submit()
+                    }
+                }
+                Spacer()
+                Button("取消") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("安裝") { submit() }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canSubmit)
+            }
+            Text("取消後雙向同步會繼續以輪詢方式檢查遠端。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(20)
+        .frame(width: 440)
+        .onChange(of: account) { password = "" }
+    }
+
+    private func submit() {
+        guard !submitted, canSubmit else { return }
+        submitted = true
+        dismiss()
+        switch account {
+        case .current:
+            app.installInotify(profileID: request.profileID, credentials: .sudoPassword(password))
+        case .other:
+            app.installInotify(
+                profileID: request.profileID,
+                credentials: .account(user: otherUser.trimmingCharacters(in: .whitespaces), password: password)
+            )
+        }
+    }
+}
+
 struct ImportSSHConfigView: View {
     @Environment(AppState.self) private var app
     @Environment(\.dismiss) private var dismiss

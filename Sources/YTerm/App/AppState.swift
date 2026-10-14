@@ -74,6 +74,7 @@ enum SheetKind: Identifiable {
     case addBookmark(PaneID)
     case bookmarks
     case pullReview(PullReviewRequest)
+    case inotifyCredentials(InotifyCredentialRequest)
 
     var id: String {
         switch self {
@@ -90,6 +91,7 @@ enum SheetKind: Identifiable {
         case let .addBookmark(pane): return "addBookmark-\(pane)"
         case .bookmarks: return "bookmarks"
         case let .pullReview(request): return "pullReview-\(request.id)"
+        case let .inotifyCredentials(request): return "inotifyCredentials-\(request.profileID.uuidString)"
         }
     }
 }
@@ -173,6 +175,7 @@ final class AppState {
     var alert: AlertInfo?
     var deleteRequest: DeleteRequest?
     var mirrorRequest: MirrorRequest?
+    var inotifyPrompt: InotifyPrompt?
     var showBottomPanel = true
     var bottomTab: BottomTab = .transfers
 
@@ -461,6 +464,71 @@ final class AppState {
 
     func presentAlert(title: String, message: String) {
         alert = AlertInfo(title: title, message: message)
+    }
+
+    // MARK: - inotify-tools
+
+    /// Installs inotify-tools on the host so two-way rules can watch it instead of polling.
+    /// Without credentials this works for root and passwordless sudo; otherwise it asks for the
+    /// account's sudo password, or for another account that can become root.
+    func installInotify(profileID: UUID, credentials: InotifyCredentials? = nil) {
+        guard let connection = connections[profileID] else {
+            presentError(AppError.notConnected)
+            return
+        }
+        guard InotifySupport.packageManager(for: connection.info) != nil else {
+            presentAlert(title: "無法自動安裝 inotify-tools", message: "找不到支援的套件管理工具，請手動安裝。目前改用輪詢。")
+            return
+        }
+        let hostName = connection.profile.displayName
+        let userName = connection.info.userName
+        let log = log
+        syncs.setInstallingInotify(profileID: profileID, true)
+        Task {
+            defer { syncs.setInstallingInotify(profileID: profileID, false) }
+            @MainActor func ask(_ message: String?, allowCurrent: Bool = true, preferOther: Bool = false) {
+                sheet = .inotifyCredentials(InotifyCredentialRequest(
+                    profileID: profileID, message: message, allowCurrentAccount: allowCurrent, preferOtherAccount: preferOther
+                ))
+            }
+            do {
+                let result: CommandResult
+                var otherUser: String?
+                switch credentials {
+                case nil:
+                    result = try await InotifySupport.install(on: connection, sudoPassword: nil)
+                case let .sudoPassword(password):
+                    result = try await InotifySupport.install(on: connection, sudoPassword: password)
+                case let .account(user, password):
+                    otherUser = user
+                    result = try await InotifySupport.install(on: connection.profile, asUser: user, password: password, log: log)
+                }
+                typealias Exit = InotifySupport.InstallExit
+                switch (result.exitCode, otherUser) {
+                case (0, _):
+                    connection.markToolAvailable("inotifywait")
+                    syncs.remoteToolsChanged(profileID: profileID)
+                case (Exit.needsPassword.rawValue, nil):
+                    ask(nil)
+                case (Exit.needsPasswordNotAdmin.rawValue, nil):
+                    ask("\(userName) 不在 sudo／wheel／admin 群組，可能無法取得 root 權限；可以改用其他有 root 權限的帳號。", preferOther: true)
+                case (Exit.wrongPassword.rawValue, nil):
+                    ask("sudo 密碼不正確，請再試一次。")
+                case (Exit.notSudoer.rawValue, nil), (Exit.noSudo.rawValue, nil):
+                    ask("\(userName) 沒有 sudo 權限，請輸入其他有 root 權限的帳號與密碼。", allowCurrent: false, preferOther: true)
+                case (Exit.notSudoer.rawValue, let user?), (Exit.noSudo.rawValue, let user?):
+                    ask("\(user) 也沒有 root 權限，請換一個帳號（例如 root 或有 sudo 權限的帳號）。", allowCurrent: false, preferOther: true)
+                case (Exit.wrongPassword.rawValue, let user?):
+                    ask("\(user) 的 sudo 密碼和登入密碼不同，無法自動安裝。", allowCurrent: false, preferOther: true)
+                default:
+                    presentAlert(title: "安裝 inotify-tools 失敗", message: result.combinedText + "\n\n目前改用輪詢。")
+                }
+            } catch let error as InotifySupport.InstallError {
+                ask(error.localizedDescription, preferOther: true)
+            } catch {
+                presentError(error, title: "安裝 inotify-tools 失敗（\(hostName)）")
+            }
+        }
     }
 
     // MARK: - File operations
@@ -831,11 +899,13 @@ final class AppState {
         singleFile: Bool = false,
         contentsOnly: Bool = false,
         extraExcludes: [String] = [],
-        filesFrom: String? = nil
+        filesFrom: String? = nil,
+        tweak: (inout RsyncOptions) -> Void = { _ in }
     ) async throws {
         var options = RsyncOptions(compress: AppSettings.compress, mirror: mirror, excludes: singleFile ? [] : AppSettings.excludes + extraExcludes, singleFile: singleFile)
         options.contentsOnly = contentsOnly
         options.filesFrom = filesFrom
+        tweak(&options)
         let localPath: String
         let remotePath: String
         let syncTree = mirror || contentsOnly

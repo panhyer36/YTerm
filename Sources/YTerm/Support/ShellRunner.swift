@@ -63,6 +63,9 @@ enum ShellRunner {
         var environment: [String: String]? = nil
         var currentDirectory: String? = nil
         var stdin: Data? = nil
+        /// Give the process a stdin pipe that stays open until it exits (remote watchers notice
+        /// the ssh channel closing through it).
+        var keepStdinOpen = false
         var onStdout: (@Sendable (Data) -> Void)? = nil
         var onStderr: (@Sendable (Data) -> Void)? = nil
     }
@@ -81,14 +84,8 @@ enum ShellRunner {
                 let errPipe = Pipe()
                 process.standardOutput = outPipe
                 process.standardError = errPipe
-                var inPipe: Pipe? = nil
-                if options.stdin != nil {
-                    let pipe = Pipe()
-                    inPipe = pipe
-                    process.standardInput = pipe
-                } else {
-                    process.standardInput = FileHandle.nullDevice
-                }
+                let inPipe: Pipe? = options.stdin != nil || options.keepStdinOpen ? Pipe() : nil
+                process.standardInput = inPipe ?? FileHandle.nullDevice
 
                 let buffer = OutputBuffer()
                 let group = DispatchGroup()
@@ -96,6 +93,7 @@ enum ShellRunner {
                 group.enter()
 
                 process.terminationHandler = { proc in
+                    if options.keepStdinOpen { try? inPipe?.fileHandleForWriting.close() }
                     group.wait()
                     let (out, err) = buffer.snapshot
                     continuation.resume(returning: CommandResult(exitCode: proc.terminationStatus, stdout: out, stderr: err))

@@ -9,6 +9,16 @@ struct ContentView: View {
             PaneLayoutView(layout: app.layout)
                 .frame(minHeight: 260)
                 .layoutPriority(1)
+                .alert(
+                    "要安裝 inotify-tools 嗎？",
+                    isPresented: Binding(get: { app.inotifyPrompt != nil }, set: { if !$0 { app.inotifyPrompt = nil } }),
+                    presenting: app.inotifyPrompt
+                ) { prompt in
+                    Button("是，安裝並使用") { app.installInotify(profileID: prompt.profileID) }
+                    Button("否，改用輪詢", role: .cancel) { app.syncs.declineInotify(profileID: prompt.profileID) }
+                } message: { prompt in
+                    Text("「\(prompt.hostName)」沒有 inotifywait，雙向同步無法即時得知遠端的變更。\n\n選「是」會用 \(prompt.packageManager) 在主機上安裝 inotify-tools（需要 root 或 sudo 權限），裝好後立即改用即時監看。選「否」則每 \(prompt.pollSeconds) 秒檢查一次遠端。")
+                }
 
             if app.showBottomPanel {
                 BottomPanelView()
@@ -361,6 +371,8 @@ struct SheetRouter: View {
             BookmarkManagerSheet()
         case let .pullReview(request):
             PullReviewSheet(request: request)
+        case let .inotifyCredentials(request):
+            InotifyCredentialsSheet(request: request)
         }
     }
 }

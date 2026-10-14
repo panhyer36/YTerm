@@ -1,8 +1,9 @@
 # Disposable Ubuntu sshd for testing YTerm (key + password auth, rsync/tar/zip installed).
 FROM ubuntu:24.04
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      openssh-server rsync zip unzip xz-utils bzip2 zstd && rm -rf /var/lib/apt/lists/* && mkdir -p /run/sshd
-RUN useradd -m -s /bin/bash tester && echo 'tester:testpass' | chpasswd
+      openssh-server rsync zip unzip xz-utils bzip2 zstd sudo && rm -rf /var/lib/apt/lists/* && mkdir -p /run/sshd
+RUN useradd -m -s /bin/bash tester && echo 'tester:testpass' | chpasswd \
+ && useradd -m -s /bin/bash -G sudo admin && echo 'admin:adminpass' | chpasswd
 RUN mkdir -p /home/tester/.ssh && chmod 700 /home/tester/.ssh
 COPY authorized_keys /home/tester/.ssh/authorized_keys
 RUN sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config \

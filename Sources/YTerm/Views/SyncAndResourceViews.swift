@@ -9,7 +9,7 @@ struct SyncListView: View {
     var body: some View {
         if app.syncs.sessions.isEmpty {
             VStack(spacing: 6) {
-                Text("自動同步會監看本機資料夾，內容一有變動就用 rsync 推到指定主機的資料夾。")
+                Text("自動同步會監看本機資料夾，內容一有變動就用 rsync 推到指定主機的資料夾；雙向模式也會把遠端的變更拉回本機。")
                     .foregroundStyle(.secondary)
                     .font(.callout)
                 Text("按「新增規則…」，或在本機面板對資料夾按右鍵選「監看此資料夾並自動同步到另一側…」。")
@@ -49,7 +49,7 @@ struct SyncSessionRow: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(session.rule.displayName)
                         .bold()
-                    Text("\(session.rule.localPath) → \(hostName)：\(session.rule.remotePath)" + (session.rule.mirror ? "（鏡像，--delete）" : ""))
+                    Text("\(session.rule.localPath) \(session.rule.mode == .twoWay ? "⇄" : "→") \(hostName)：\(session.rule.remotePath)" + (session.rule.mirror && session.rule.mode == .push ? "（鏡像，--delete）" : ""))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -66,9 +66,14 @@ struct SyncSessionRow: View {
                 }
                 Button("立即同步") { app.syncs.syncNow(session) }
                     .disabled(!session.rule.enabled || session.state == .syncing)
-                Button("檢查遠端變更…") { review() }
-                    .disabled(session.rule.profileID == nil || app.connections[session.rule.profileID!] == nil)
-                    .help("列出遠端新增／修改而本機沒有的檔案，勾選後才下載回本機")
+                if session.rule.mode == .push {
+                    Button("檢查遠端變更…") { review() }
+                        .disabled(session.rule.profileID == nil || app.connections[session.rule.profileID!] == nil)
+                        .help("列出遠端新增／修改而本機沒有的檔案，勾選後才下載回本機")
+                } else if session.remoteWatch == .polling, let profileID = session.rule.profileID, app.syncs.canInstallInotify(profileID: profileID) {
+                    Button("安裝 inotify-tools…") { app.installInotify(profileID: profileID) }
+                        .help("在主機上安裝 inotify-tools，改用即時監看遠端變更")
+                }
                 Button("編輯…") { app.sheet = .syncRule(session.rule) }
                 Button {
                     app.syncs.remove(session.id)
@@ -80,6 +85,10 @@ struct SyncSessionRow: View {
             .controlSize(.small)
             if let job = session.job, job.state == .running, let fraction = job.progress.overallFraction {
                 ProgressView(value: fraction)
+                    .padding(.leading, 56)
+            }
+            if session.rule.mode == .twoWay {
+                TwoWayDetails(session: session)
                     .padding(.leading, 56)
             }
         }
@@ -106,6 +115,44 @@ struct SyncSessionRow: View {
         case .syncing: return .accentColor
         case .failed: return .red
         }
+    }
+}
+
+/// Conflicts and backup folders of a two-way rule.
+struct TwoWayDetails: View {
+    let session: SyncSession
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let note = session.remoteWatchNote {
+                Text(note)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            }
+            if !session.conflicts.isEmpty {
+                Text("衝突（兩邊都改過，保留較新的版本）：" + session.conflicts.prefix(5).map { "\($0.path)（\($0.localWon ? "本機" : "遠端")較新）" }.joined(separator: "、") + (session.conflicts.count > 5 ? "…等 \(session.conflicts.count) 個" : ""))
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            }
+            HStack(spacing: 8) {
+                if let directory = session.localBackupDirectory {
+                    Button("顯示本機備份") {
+                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: directory)])
+                    }
+                    .help("被遠端較新版本覆蓋前的本機檔案")
+                }
+                if let directory = session.remoteBackupDirectory {
+                    Text("遠端被覆蓋或刪除的檔案備份在 \(directory)")
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                }
+            }
+        }
+        .font(.caption)
+        .controlSize(.small)
     }
 }
 
@@ -163,11 +210,22 @@ struct SyncRuleEditorSheet: View {
                         .fixedSize()
                     }
                 }
-                Toggle("鏡像：刪除遠端多出來的檔案（rsync --delete）", isOn: $rule.mirror)
-                if rule.mirror {
-                    Text("遠端資料夾內不存在於本機的檔案會被刪除，請確認遠端路徑正確。")
-                        .font(.caption)
-                        .foregroundStyle(.red)
+                Picker("同步方向", selection: $rule.mode) {
+                    ForEach(SyncMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                if rule.mode == .push {
+                    Toggle("鏡像：刪除遠端多出來的檔案（rsync --delete）", isOn: $rule.mirror)
+                    if rule.mirror {
+                        Text("遠端資料夾內不存在於本機的檔案會被刪除，請確認遠端路徑正確。")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                } else {
+                    Stepper(value: $rule.pollSeconds, in: 2...600, step: rule.pollSeconds < 10 ? 1 : 5) {
+                        Text("沒有 inotifywait 時每 \(rule.pollSeconds) 秒檢查遠端")
+                    }
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     Text("額外排除樣式（每行一個；設定中的全域排除也會套用）")
@@ -179,9 +237,16 @@ struct SyncRuleEditorSheet: View {
             }
             .formStyle(.grouped)
             .frame(height: 400)
-            Text("儲存後會先做一次完整同步，之後本機資料夾內任何變動（含子資料夾）約 1 秒後自動推送。遠端的變更不會自動拉回：按規則列的「檢查遠端變更…」列出遠端新增或修改的檔案，勾選後才下載。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            Group {
+                if rule.mode == .push {
+                    Text("儲存後會先做一次完整同步，之後本機資料夾內任何變動（含子資料夾）約 1 秒後自動推送；遠端比較新的檔案不會被覆蓋。遠端的變更不會自動拉回：按規則列的「檢查遠端變更…」列出遠端新增或修改的檔案，勾選後才下載。")
+                } else {
+                    Text("哪一邊改過就以哪一邊為準：本機改了就上傳、遠端改了就下載；兩邊都改過時保留最後修改的版本，另一個版本會先備份。一邊刪除的檔案在另一邊也會刪除（本機移到垃圾桶、遠端移到 ~/\(SyncRule.backupFolderName)）。遠端用 inotifywait 即時監看，主機沒有時會詢問是否安裝，否則改為輪詢。")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Spacer()
                 Button("取消") { dismiss() }
@@ -203,6 +268,8 @@ struct SyncRuleEditorSheet: View {
         while result.localPath.count > 1, result.localPath.hasSuffix("/") { result.localPath.removeLast() }
         result.remotePath = rule.remotePath.trimmingCharacters(in: .whitespaces)
         while result.remotePath.count > 1, result.remotePath.hasSuffix("/") { result.remotePath.removeLast() }
+        if result.mode == .twoWay { result.mirror = false }
+        result.pollSeconds = min(max(result.pollSeconds, 2), 600)
         result.excludes = excludesText.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         return result
     }

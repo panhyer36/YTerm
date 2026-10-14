@@ -105,6 +105,27 @@ final class RsyncBuilderTests: XCTestCase {
         XCTAssertTrue(args.contains("--delete"))
         XCTAssertEqual(args.suffix(2), ["/Users/me/project/", "u@host:/home/u/project/"])
     }
+
+    func testUpdateBackupAndFlatFileList() {
+        var options = RsyncOptions(contentsOnly: true)
+        options.update = true
+        options.filesFrom = "/tmp/list"
+        options.filesFromRecursive = false
+        options.backupDirectory = "/tmp/backup"
+        let args = RsyncBuilder.arguments(
+            flavor: rsync, direction: .upload, localPath: "/Users/me/project", remotePath: "/home/u/project",
+            remoteDestination: "u@host", rsh: "/usr/bin/ssh", options: options
+        )
+        XCTAssertTrue(args.contains("--update"))
+        XCTAssertTrue(args.contains("--files-from=/tmp/list"))
+        XCTAssertFalse(args.contains("-r"))
+        XCTAssertTrue(args.contains("--backup"))
+        XCTAssertTrue(args.contains("--backup-dir=/tmp/backup"))
+        XCTAssertFalse(RsyncBuilder.arguments(
+            flavor: rsync, direction: .upload, localPath: "/a", remotePath: "/b",
+            remoteDestination: "u@host", rsh: "/usr/bin/ssh", options: RsyncOptions()
+        ).contains("--update"))
+    }
 }
 
 final class UnixCommandsTests: XCTestCase {

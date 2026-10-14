@@ -17,7 +17,8 @@ macOS 雙欄 ssh／rsync 檔案管理程式（SwiftUI）。左本機、右遠端
 - 指令紀錄：每條指令、結束碼與輸出
 - ssh ControlMaster 共用連線；金鑰、`~/.ssh/config`（含 ProxyJump）、密碼（鑰匙圈 + SSH_ASKPASS）
 - 遠端檔案本機編輯，儲存後自動上傳，保留權限與擁有者
-- 自動同步：FSEvents 監看本機資料夾，變動後 rsync 推送（可鏡像、排除）；「檢查遠端變更」以試跑列出差異並勾選下載
+- 自動同步：FSEvents 監看本機資料夾，變動後 rsync 推送（`--update`，不覆蓋遠端較新的檔案；可鏡像、排除）；「檢查遠端變更」以試跑列出差異並勾選下載
+- 雙向同步：哪邊改過就以哪邊為準，兩邊都改過保留較新版本並備份另一份；刪除會同步（本機移到垃圾桶、遠端移到 `~/.yterm-sync-backup`）。遠端用 inotifywait 即時監看，主機沒有時詢問是否代為安裝 inotify-tools（目前帳號不能 sudo 時可改用其他有 root 權限的帳號），否則改為輪詢
 - 書籤與最近位置；主機資源（負載、記憶體、磁碟、GPU、程序）
 - 執行單行指令、Terminal.app、Cursor／VS Code（Remote-SSH，可在設定選擇）
 

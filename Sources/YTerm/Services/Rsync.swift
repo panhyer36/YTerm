@@ -80,6 +80,12 @@ struct RsyncOptions: Sendable {
     var itemize = false
     /// Only transfer the relative paths listed in this file (implies -r so listed folders recurse).
     var filesFrom: String? = nil
+    /// With `filesFrom`, add -r so listed folders recurse. Bidirectional sync lists every path itself.
+    var filesFromRecursive = true
+    /// Skip files that are newer on the destination (`--update`).
+    var update = false
+    /// Keep files that get overwritten or deleted in this directory on the receiving side.
+    var backupDirectory: String? = nil
     /// Transfer one file with `-t` instead of `-a`: times are kept, but an existing destination
     /// file retains its own permissions/owner (used by remote editing).
     var singleFile = false
@@ -124,10 +130,15 @@ enum RsyncBuilder {
             args += ["-v", "--progress"]
         }
         if options.compress { args.append("-z") }
+        if options.update { args.append("--update") }
         if options.mirror { args.append("--delete") }
+        if let backupDirectory = options.backupDirectory { args += ["--backup", "--backup-dir=" + backupDirectory] }
         if options.dryRun { args.append("-n") }
         if options.itemize { args += ["-i", "--out-format=%i\t%l\t%n"] }
-        if let filesFrom = options.filesFrom { args += ["-r", "--files-from=" + filesFrom] }
+        if let filesFrom = options.filesFrom {
+            if options.filesFromRecursive { args.append("-r") }
+            args.append("--files-from=" + filesFrom)
+        }
         for pattern in options.excludes where !pattern.isEmpty {
             args.append("--exclude=" + pattern)
         }

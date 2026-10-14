@@ -182,4 +182,149 @@ final class RemoteIntegrationTests: XCTestCase {
         XCTAssertFalse(gone)
         XCTAssertFalse(log.entries.isEmpty)
     }
+
+    /// Two-way passes against the real host: new files both ways, edits, conflicts with backups,
+    /// deletions both ways, then inotify-tools installed through sudo and the watcher reporting changes.
+    @MainActor
+    func testTwoWaySyncAndInotify() async throws {
+        let env = try requireEnvironment()
+        let connection = RemoteConnection(profile: env.profile(usePassword: false), password: nil, log: CommandLog())
+        let info = try await connection.bootstrap()
+        guard let flavor = await RsyncLocator.detect(customPath: "") else { throw XCTSkip("no local rsync") }
+        let fs = RemoteFileSystem(connection: connection)
+        let remoteRoot = info.home + "/yterm-2way-\(UUID().uuidString.prefix(6))"
+        let localRoot = NSTemporaryDirectory() + "yterm-2way-\(UUID().uuidString.prefix(6))"
+        try FileManager.default.createDirectory(atPath: localRoot + "/sub", withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(atPath: localRoot)
+            try? FileManager.default.removeItem(atPath: AppPaths.supportDirectory + "/sync-backup/it")
+            Task { try? await fs.delete([remoteRoot, info.home + "/" + SyncRule.backupFolderName]); await connection.disconnect() }
+        }
+        let excludes = SyncExcludes([SyncRule.backupFolderName])
+        let engine = TwoWaySyncEngine(
+            connection: connection, localRoot: localRoot, remoteRoot: remoteRoot, excludes: excludes, backupName: "it",
+            transfer: { direction, listFile, backup in
+                var options = RsyncOptions(contentsOnly: true)
+                options.filesFrom = listFile
+                options.filesFromRecursive = false
+                options.backupDirectory = backup
+                let args = RsyncBuilder.arguments(
+                    flavor: flavor, direction: direction, localPath: localRoot, remotePath: remoteRoot,
+                    remoteDestination: connection.destination, rsh: connection.rshCommand, options: options,
+                    remoteIsOpenrsync: info.remoteRsyncIsOpenrsync
+                )
+                let result = try await ShellRunner.run(flavor.path, args, options: .init(environment: connection.environment))
+                guard result.succeeded else { throw AppError.general(result.stderrText) }
+            }
+        )
+        func remote(_ script: String) async throws -> String {
+            try await connection.runChecked("cd \(Shell.quote(remoteRoot)) && " + script).stdoutText
+        }
+        func local(_ name: String) -> String? { try? String(contentsOfFile: localRoot + "/" + name, encoding: .utf8) }
+        func write(_ text: String, _ name: String, mtime: Date = Date()) throws {
+            try text.write(toFile: localRoot + "/" + name, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.modificationDate: mtime], ofItemAtPath: localRoot + "/" + name)
+        }
+
+        // 1. First pass creates the remote folder and uploads.
+        try write("one", "a.txt")
+        try write("deep", "sub/b.txt")
+        var outcome = try await engine.run(baseline: [:])
+        XCTAssertEqual(Set(outcome.plan.push), ["a.txt", "sub", "sub/b.txt"])
+        let b1 = try await remote("cat sub/b.txt")
+        XCTAssertEqual(b1, "deep")
+        var baseline = outcome.baseline
+        XCTAssertEqual(baseline.count, 3)
+
+        // 2. Nothing changed: nothing to do.
+        outcome = try await engine.run(baseline: baseline)
+        XCTAssertTrue(outcome.plan.isEmpty)
+
+        // 3. Remote edit and a new remote file come down; a local edit goes up.
+        _ = try await remote("printf remote-edit > a.txt && printf new > r.txt")
+        try write("local-edit", "sub/b.txt")
+        outcome = try await engine.run(baseline: outcome.baseline)
+        XCTAssertEqual(Set(outcome.plan.pull), ["a.txt", "r.txt"])
+        XCTAssertEqual(outcome.plan.push, ["sub/b.txt"])
+        XCTAssertEqual(local("a.txt"), "remote-edit")
+        let b2 = try await remote("cat sub/b.txt")
+        XCTAssertEqual(b2, "local-edit")
+        baseline = outcome.baseline
+
+        // 4. Both sides edit a.txt: the newer remote copy wins, the local one is backed up.
+        try write("older-local", "a.txt", mtime: Date().addingTimeInterval(-60))
+        _ = try await remote("printf newer-remote > a.txt")
+        outcome = try await engine.run(baseline: baseline)
+        XCTAssertEqual(outcome.plan.conflicts.map(\.path), ["a.txt"])
+        XCTAssertEqual(local("a.txt"), "newer-remote")
+        let backup = try XCTUnwrap(outcome.localBackupDirectory)
+        XCTAssertEqual(try String(contentsOfFile: backup + "/a.txt", encoding: .utf8), "older-local")
+        baseline = outcome.baseline
+
+        // 5. Deletions: r.txt removed locally, sub/ removed remotely.
+        try FileManager.default.removeItem(atPath: localRoot + "/r.txt")
+        _ = try await remote("rm -rf sub")
+        outcome = try await engine.run(baseline: baseline)
+        XCTAssertEqual(outcome.plan.deleteRemote, ["r.txt"])
+        XCTAssertEqual(outcome.plan.deleteLocal, ["sub"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: localRoot + "/sub"))
+        let listing = try await remote("ls")
+        XCTAssertEqual(listing, "a.txt\n")
+        let moved = try await connection.run("ls ~/\(SyncRule.backupFolderName)/it/*/r.txt").exitCode
+        XCTAssertEqual(moved, 0, "remote deletions are moved into the backup folder")
+        XCTAssertFalse(outcome.needsAnotherPass)
+
+        // 6. Poll fingerprint matches the last listing until something changes.
+        let pollScript = SyncListing.pollScript(root: remoteRoot, excludes: excludes)
+        var poll = SyncListing.parsePoll(try await connection.runChecked(pollScript).stdoutText)
+        XCTAssertEqual(poll.fingerprint, outcome.fingerprint)
+        _ = try await remote("printf x > poll.txt")
+        poll = SyncListing.parsePoll(try await connection.runChecked(pollScript).stdoutText)
+        XCTAssertNotEqual(poll.fingerprint, outcome.fingerprint)
+
+        // 7. The test account cannot use sudo; install through another account and watch for a change.
+        guard let password = env.password, info.has("sudo"), InotifySupport.packageManager(for: info) != nil else {
+            await connection.disconnect()
+            return
+        }
+        let probe = try await InotifySupport.install(on: connection, sudoPassword: nil)
+        if probe.exitCode != 0 {
+            XCTAssertEqual(probe.exitCode, InotifySupport.InstallExit.needsPasswordNotAdmin.rawValue, probe.combinedText)
+            let asTester = try await InotifySupport.install(on: connection, sudoPassword: password)
+            XCTAssertEqual(asTester.exitCode, InotifySupport.InstallExit.notSudoer.rawValue, asTester.combinedText)
+            let environment = ProcessInfo.processInfo.environment
+            guard let adminUser = environment["YTERM_IT_ADMIN_USER"], let adminPassword = environment["YTERM_IT_ADMIN_PASSWORD"] else {
+                throw XCTSkip("YTERM_IT_ADMIN_USER not set")
+            }
+            do {
+                _ = try await InotifySupport.install(on: connection.profile, asUser: adminUser, password: "wrong", log: CommandLog())
+                XCTFail("expected login failure")
+            } catch {
+                XCTAssertTrue(error is InotifySupport.InstallError, "\(error)")
+            }
+            let installed = try await InotifySupport.install(on: connection.profile, asUser: adminUser, password: adminPassword, log: CommandLog())
+            XCTAssertEqual(installed.exitCode, 0, installed.combinedText)
+        }
+        let afterInstall = try await connection.runChecked(pollScript).stdoutText
+        XCTAssertTrue(SyncListing.parsePoll(afterInstall).hasInotify)
+
+        let events = LockedBox<String>("")
+        let watcher = Task {
+            try await connection.watch(InotifySupport.watchScript(root: remoteRoot, excludes: excludes)) { data in
+                events.mutate { $0 += String(decoding: data, as: UTF8.self) }
+            }
+        }
+        try await Task.sleep(for: .seconds(1))
+        _ = try await remote("printf y > watched.txt")
+        let deadline = Date().addingTimeInterval(10)
+        while !events.value.contains("watched.txt"), Date() < deadline { try await Task.sleep(for: .milliseconds(100)) }
+        XCTAssertTrue(events.value.contains("watched.txt"), events.value)
+        watcher.cancel()
+        _ = try? await watcher.value
+        try await Task.sleep(for: .seconds(1))
+        let leftover = try await connection.run("pgrep -u \(info.userName) inotifywait").exitCode
+        XCTAssertNotEqual(leftover, 0, "inotifywait must exit when the app hangs up")
+        try await fs.delete([remoteRoot, info.home + "/" + SyncRule.backupFolderName])
+        await connection.disconnect()
+    }
 }

@@ -152,6 +152,22 @@ final class RemoteConnection: CommandExecutor, @unchecked Sendable {
         }
     }
 
+    /// Runs a long-lived script (e.g. a file watcher) until it exits or the task is cancelled.
+    /// Its stdin stays open so the remote side sees EOF when we hang up.
+    func watch(_ script: String, onStdout: @escaping @Sendable (Data) -> Void) async throws -> CommandResult {
+        let remoteCommand = "sh -c " + Shell.quote(script)
+        let args = sshOptionArguments + ["--", destination, remoteCommand]
+        return try await ShellRunner.run(
+            sshPath, args,
+            options: .init(environment: environment, keepStdinOpen: true, onStdout: onStdout)
+        )
+    }
+
+    /// Records a tool installed after `bootstrap` (e.g. inotifywait installed from the app).
+    func markToolAvailable(_ tool: String) {
+        infoLock.withLock { _ = storedInfo.tools.insert(tool) }
+    }
+
     /// Establish the master connection and discover the remote environment.
     @discardableResult
     func bootstrap() async throws -> RemoteInfo {
@@ -159,7 +175,7 @@ final class RemoteConnection: CommandExecutor, @unchecked Sendable {
         printf 'home\\t%s\\n' "$HOME"
         printf 'os\\t%s\\n' "$(uname -s 2>/dev/null)"
         printf 'user\\t%s\\n' "$(id -un 2>/dev/null)"
-        for c in rsync tar zip unzip gzip bzip2 xz zstd 7z unrar du df; do command -v "$c" >/dev/null 2>&1 && printf 'tool\\t%s\\n' "$c"; done
+        for c in rsync tar zip unzip gzip bzip2 xz zstd 7z unrar du df inotifywait sudo apt-get dnf yum zypper pacman apk; do command -v "$c" >/dev/null 2>&1 && printf 'tool\\t%s\\n' "$c"; done
         if find . -maxdepth 0 -printf '' >/dev/null 2>&1; then printf 'gnufind\\tyes\\n'; fi
         printf 'rsyncversion\\t%s\\n' "$(rsync --version 2>/dev/null | head -n 1)"
         exit 0
