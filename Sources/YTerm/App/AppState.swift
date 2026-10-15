@@ -75,6 +75,7 @@ enum SheetKind: Identifiable {
     case bookmarks
     case pullReview(PullReviewRequest)
     case inotifyCredentials(InotifyCredentialRequest)
+    case syncBackups(UUID)
 
     var id: String {
         switch self {
@@ -92,6 +93,7 @@ enum SheetKind: Identifiable {
         case .bookmarks: return "bookmarks"
         case let .pullReview(request): return "pullReview-\(request.id)"
         case let .inotifyCredentials(request): return "inotifyCredentials-\(request.profileID.uuidString)"
+        case let .syncBackups(ruleID): return "syncBackups-\(ruleID.uuidString)"
         }
     }
 }

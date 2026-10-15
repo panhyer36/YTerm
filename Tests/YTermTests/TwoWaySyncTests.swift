@@ -257,3 +257,70 @@ final class SyncRuleModeTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(SyncRule.self, from: try JSONEncoder().encode(twoWay)), twoWay)
     }
 }
+
+final class SyncBackupsTests: XCTestCase {
+    private func makeBackups() throws -> String {
+        let root = NSTemporaryDirectory() + "yterm-backups-\(UUID().uuidString.prefix(6))"
+        let fm = FileManager.default
+        for path in ["AAAA0001/20260101-120000/a.txt", "AAAA0001/20261001-080000/sub/b.txt", "BBBB0002/20250505-000000/c.txt", "BBBB0002/notes/keep.txt"] {
+            let full = root + "/" + path
+            try fm.createDirectory(atPath: (full as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            try "12345".write(toFile: full, atomically: true, encoding: .utf8)
+        }
+        return root
+    }
+
+    func testCutoffAndStamps() {
+        let now = Date(timeIntervalSince1970: 1_791_936_000) // 2026-10-14 00:00 UTC
+        XCTAssertNil(SyncBackups.cutoff(retentionDays: 0, now: now))
+        let cutoff = SyncBackups.cutoff(retentionDays: 30, now: now)!
+        XCTAssertTrue(SyncBackups.isStamp(cutoff))
+        XCTAssertLessThan(cutoff, SyncBackups.stamp(for: now))
+        XCTAssertLessThan("20261001-080000", SyncBackups.everything)
+        XCTAssertFalse(SyncBackups.isStamp("notes"))
+    }
+
+    func testLocalPruneAndUsage() throws {
+        let root = try makeBackups()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let usage = SyncBackups.localUsage(ruleFolder: "AAAA0001", root: root)
+        XCTAssertEqual(usage.snapshots, 2)
+        XCTAssertEqual(usage.oldest, "20260101-120000")
+        XCTAssertGreaterThan(usage.bytes, 0)
+
+        XCTAssertEqual(SyncBackups.pruneLocal(before: "20260601-000000", root: root), 2)
+        let fm = FileManager.default
+        XCTAssertTrue(fm.fileExists(atPath: root + "/AAAA0001/20261001-080000/sub/b.txt"))
+        XCTAssertTrue(fm.fileExists(atPath: root + "/BBBB0002/notes/keep.txt"), "only stamp folders are touched")
+
+        XCTAssertEqual(SyncBackups.pruneLocal(before: SyncBackups.everything, ruleFolder: "AAAA0001", root: root), 1)
+        XCTAssertFalse(fm.fileExists(atPath: root + "/AAAA0001"), "empty rule folder is removed")
+    }
+
+    /// The remote scripts run here as well; `home` points at a temp folder.
+    func testRemoteScriptsLocally() async throws {
+        let home = NSTemporaryDirectory() + "yterm-home-\(UUID().uuidString.prefix(6))"
+        let root = SyncBackups.remoteRoot(home: home)
+        try FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        try FileManager.default.moveItem(atPath: try makeBackups(), toPath: root)
+
+        let usage = try await ShellRunner.run("/bin/sh", ["-c", SyncBackups.remoteUsageScript(home: home, ruleFolder: "AAAA0001")])
+        let parsed = SyncBackups.parseRemoteUsage(usage.stdoutText)
+        XCTAssertEqual(parsed.snapshots, 2, usage.stdoutText + usage.stderrText)
+        XCTAssertEqual(parsed.oldest, "20260101-120000")
+        XCTAssertGreaterThan(parsed.bytes, 0)
+        let missing = try await ShellRunner.run("/bin/sh", ["-c", SyncBackups.remoteUsageScript(home: home, ruleFolder: "NOPE0000")])
+        XCTAssertEqual(SyncBackups.parseRemoteUsage(missing.stdoutText), SyncBackups.Usage())
+
+        let prune = try await ShellRunner.run("/bin/sh", ["-c", SyncBackups.remotePruneScript(home: home, before: "20260601-000000")])
+        XCTAssertEqual(prune.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines), "2", prune.stderrText)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root + "/AAAA0001/20261001-080000/sub/b.txt"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root + "/BBBB0002/notes/keep.txt"))
+
+        let all = try await ShellRunner.run("/bin/sh", ["-c", SyncBackups.remotePruneScript(home: home, before: SyncBackups.everything, ruleFolder: "AAAA0001")])
+        XCTAssertEqual(all.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines), "1")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root + "/AAAA0001"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root + "/BBBB0002"))
+    }
+}

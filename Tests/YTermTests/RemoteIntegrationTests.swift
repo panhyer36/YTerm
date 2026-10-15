@@ -274,6 +274,16 @@ final class RemoteIntegrationTests: XCTestCase {
         XCTAssertEqual(moved, 0, "remote deletions are moved into the backup folder")
         XCTAssertFalse(outcome.needsAnotherPass)
 
+        // Backups on the host: usage, then expired-only cleanup keeps them, full cleanup removes them.
+        let usageText = try await connection.runChecked(SyncBackups.remoteUsageScript(home: info.home, ruleFolder: "it")).stdoutText
+        XCTAssertGreaterThanOrEqual(SyncBackups.parseRemoteUsage(usageText).snapshots, 1)
+        let keep = try await connection.runChecked(SyncBackups.remotePruneScript(home: info.home, before: "20000101-000000", ruleFolder: "it")).stdoutText
+        XCTAssertEqual(keep.trimmingCharacters(in: .whitespacesAndNewlines), "0")
+        let all = try await connection.runChecked(SyncBackups.remotePruneScript(home: info.home, before: SyncBackups.everything, ruleFolder: "it")).stdoutText
+        XCTAssertGreaterThanOrEqual(Int(all.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0, 1)
+        let gone = try await connection.run("test -e ~/\(SyncRule.backupFolderName)").exitCode
+        XCTAssertNotEqual(gone, 0, "empty backup root is removed")
+
         // 6. Poll fingerprint matches the last listing until something changes.
         let pollScript = SyncListing.pollScript(root: remoteRoot, excludes: excludes)
         var poll = SyncListing.parsePoll(try await connection.runChecked(pollScript).stdoutText)

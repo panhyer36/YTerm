@@ -74,6 +74,10 @@ struct SyncSessionRow: View {
                     Button("安裝 inotify-tools…") { app.installInotify(profileID: profileID) }
                         .help("在主機上安裝 inotify-tools，改用即時監看遠端變更")
                 }
+                if session.rule.mode == .twoWay {
+                    Button("備份…") { app.sheet = .syncBackups(session.rule.id) }
+                        .help("查看或清除被覆蓋、被刪除檔案的備份")
+                }
                 Button("編輯…") { app.sheet = .syncRule(session.rule) }
                 Button {
                     app.syncs.remove(session.id)
@@ -118,7 +122,7 @@ struct SyncSessionRow: View {
     }
 }
 
-/// Conflicts and backup folders of a two-way rule.
+/// Conflicts and watcher notes of a two-way rule.
 struct TwoWayDetails: View {
     let session: SyncSession
 
@@ -135,24 +139,126 @@ struct TwoWayDetails: View {
                     .lineLimit(2)
                     .textSelection(.enabled)
             }
-            HStack(spacing: 8) {
-                if let directory = session.localBackupDirectory {
-                    Button("顯示本機備份") {
-                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: directory)])
-                    }
-                    .help("被遠端較新版本覆蓋前的本機檔案")
-                }
-                if let directory = session.remoteBackupDirectory {
-                    Text("遠端被覆蓋或刪除的檔案備份在 \(directory)")
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
-                }
-            }
         }
         .font(.caption)
         .controlSize(.small)
+    }
+}
+
+/// Backups of one two-way rule on both sides, with manual cleanup.
+struct SyncBackupsSheet: View {
+    @Environment(AppState.self) private var app
+    @Environment(\.dismiss) private var dismiss
+    let ruleID: UUID
+    @State private var local: SyncBackups.Usage?
+    @State private var remote: SyncBackups.Usage?
+    @State private var loading = true
+    @State private var confirmClear = false
+    @State private var working = false
+    @State private var result: String?
+
+    private var session: SyncSession? { app.syncs.session(ruleID) }
+    private var hostName: String {
+        session?.rule.profileID.flatMap { app.profiles.profile(id: $0)?.displayName } ?? "遠端"
+    }
+    private var isConnected: Bool {
+        session?.rule.profileID.map { app.connections[$0] != nil } ?? false
+    }
+    private var retentionText: String {
+        let days = AppSettings.syncBackupRetentionDays
+        return days == 0 ? "目前設定為永久保留，不會自動清理。" : "超過 \(days) 天的備份會自動刪除（可在設定調整）。"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("「\(session?.rule.displayName ?? "")」的備份")
+                .font(.title2)
+                .bold()
+            Text("雙向同步覆蓋或刪除檔案前會先備份。這些備份只是保險，App 不會再讀取，可以隨時刪除。")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
+                GridRow {
+                    Text("本機").bold()
+                    usageText(local)
+                    Button("在 Finder 顯示") { revealLocal() }
+                        .disabled((local?.snapshots ?? 0) == 0)
+                }
+                GridRow {
+                    Text(hostName).bold()
+                    if isConnected {
+                        usageText(remote)
+                    } else {
+                        Text("未連線，連上後才能查看或清除").foregroundStyle(.secondary)
+                    }
+                }
+            }
+            Text("遠端位置：" + SyncBackups.remoteRoot(home: "~") + "/" + SyncBackups.folderName(for: ruleID))
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            Text("本機被刪除的檔案在垃圾桶，不在這裡。" + retentionText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let result {
+                Text(result).font(.caption).foregroundStyle(.green)
+            }
+            HStack {
+                Button("全部清除…", role: .destructive) { confirmClear = true }
+                    .disabled(working || loading || ((local?.snapshots ?? 0) == 0 && (remote?.snapshots ?? 0) == 0))
+                if working || loading { ProgressView().controlSize(.small) }
+                Spacer()
+                Button("關閉") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 560)
+        .task { await reload() }
+        .confirmationDialog("要刪除這條規則的全部備份嗎？", isPresented: $confirmClear, titleVisibility: .visible) {
+            Button("刪除", role: .destructive) { clear() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(isConnected ? "本機與 \(hostName) 上的備份都會永久刪除，無法復原。" : "會永久刪除本機的備份；\(hostName) 未連線，遠端的備份不會刪除。")
+        }
+    }
+
+    @ViewBuilder
+    private func usageText(_ usage: SyncBackups.Usage?) -> some View {
+        if let usage {
+            if usage.snapshots == 0 {
+                Text("沒有備份").foregroundStyle(.secondary)
+            } else {
+                Text("\(usage.snapshots) 份，\(ByteCountFormatter.string(fromByteCount: usage.bytes, countStyle: .file))" + (usage.oldestDate.map { "，最舊 \($0.formatted(date: .abbreviated, time: .omitted))" } ?? ""))
+                    .monospacedDigit()
+                    .fixedSize()
+            }
+        } else {
+            Text(loading ? "讀取中…" : "—").foregroundStyle(.secondary)
+        }
+    }
+
+    private func reload() async {
+        loading = true
+        let usage = await app.syncs.backupUsage(ruleID: ruleID)
+        local = usage.local
+        remote = usage.remote
+        loading = false
+    }
+
+    private func revealLocal() {
+        let path = SyncBackups.localRoot + "/" + SyncBackups.folderName(for: ruleID)
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+    }
+
+    private func clear() {
+        working = true
+        Task {
+            let removed = await app.syncs.pruneBackups(before: SyncBackups.everything, ruleID: ruleID)
+            result = "已刪除本機 \(removed.local) 份、遠端 \(removed.remote) 份備份。"
+            working = false
+            await reload()
+        }
     }
 }
 

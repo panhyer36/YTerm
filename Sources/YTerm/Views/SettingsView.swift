@@ -13,6 +13,10 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.showHiddenFiles) private var showHidden = false
     @AppStorage(SettingsKey.editorAppPath) private var editorAppPath = ""
     @AppStorage(SettingsKey.preferredIDE) private var preferredIDE = ""
+    @AppStorage(SettingsKey.syncBackupRetentionDays) private var backupRetentionDays = 30
+    @State private var backupMessage: String?
+    @State private var cleaningBackups = false
+    @State private var confirmClearBackups = false
 
     var body: some View {
         Form {
@@ -70,6 +74,37 @@ struct SettingsView: View {
                     }
                 }
             }
+            Section("雙向同步備份") {
+                Picker("自動清理", selection: $backupRetentionDays) {
+                    ForEach([7, 14, 30, 60, 90, 180, 365], id: \.self) { days in
+                        Text("保留 \(days) 天").tag(days)
+                    }
+                    Text("永久保留").tag(0)
+                }
+                Text("覆蓋或刪除前的備份放在本機「\(SyncBackups.localRoot)」與遠端 ~/\(SyncRule.backupFolderName)。過期的備份在開啟 App、連上主機時及每 6 小時清理一次；遠端只在連線時清理。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("立即清理過期備份") {
+                        guard let cutoff = SyncBackups.cutoff(retentionDays: backupRetentionDays) else { return }
+                        cleanBackups(before: cutoff)
+                    }
+                    .disabled(backupRetentionDays == 0 || cleaningBackups)
+                    Button("刪除全部備份…", role: .destructive) { confirmClearBackups = true }
+                        .disabled(cleaningBackups)
+                    if cleaningBackups { ProgressView().controlSize(.small) }
+                }
+                if let backupMessage {
+                    Text(backupMessage).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .confirmationDialog("要刪除全部同步備份嗎？", isPresented: $confirmClearBackups, titleVisibility: .visible) {
+                Button("刪除", role: .destructive) { cleanBackups(before: SyncBackups.everything) }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("會永久刪除本機所有規則的備份，以及目前已連線主機上的備份，無法復原。")
+            }
             Section("IDE") {
                 Picker("開啟目前資料夾的 IDE", selection: $preferredIDE) {
                     Text("自動（Cursor、VS Code、VS Code Insiders 依序）").tag("")
@@ -103,6 +138,15 @@ struct SettingsView: View {
     }
 
     private var installedIDEs: [IDELauncher.IDE] { IDELauncher.installedIDEs() }
+
+    private func cleanBackups(before cutoff: String) {
+        cleaningBackups = true
+        Task {
+            let removed = await app.syncs.pruneBackups(before: cutoff)
+            backupMessage = "已刪除本機 \(removed.local) 份、遠端 \(removed.remote) 份備份。"
+            cleaningBackups = false
+        }
+    }
 
     private func pickEditor() {
         let panel = NSOpenPanel()

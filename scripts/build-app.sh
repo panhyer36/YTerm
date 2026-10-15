@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 APP_NAME="YTerm"
 DISPLAY_NAME="YTerm"
 BUNDLE_ID="com.yterm.app"
-VERSION="${VERSION:-1.4.0}"
+VERSION="${VERSION:-1.4.1}"
 OUT_DIR="build"
 APP_DIR="$OUT_DIR/$APP_NAME.app"
 

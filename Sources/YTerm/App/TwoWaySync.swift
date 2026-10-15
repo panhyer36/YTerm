@@ -526,9 +526,9 @@ struct TwoWaySyncEngine: Sendable {
         var remoteAfter = remoteBefore
 
         if !plan.isEmpty {
-            let stamp = Self.stampFormatter.string(from: Date())
-            let remoteBackup = PathUtil.join(connection.info.home, ".yterm-sync-backup/\(backupName)/\(stamp)")
-            let localBackup = AppPaths.supportDirectory + "/sync-backup/\(backupName)/\(stamp)"
+            let stamp = SyncBackups.stamp(for: Date())
+            let remoteBackup = SyncBackups.remoteRoot(home: connection.info.home) + "/\(backupName)/\(stamp)"
+            let localBackup = SyncBackups.localRoot + "/\(backupName)/\(stamp)"
 
             try await send(.upload, plan.push, backup: nil)
             if !plan.pushOverwriting.isEmpty {
@@ -628,10 +628,4 @@ struct TwoWaySyncEngine: Sendable {
         }
     }
 
-    private static let stampFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        return formatter
-    }()
 }

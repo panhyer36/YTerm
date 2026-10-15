@@ -373,6 +373,8 @@ struct SheetRouter: View {
             PullReviewSheet(request: request)
         case let .inotifyCredentials(request):
             InotifyCredentialsSheet(request: request)
+        case let .syncBackups(ruleID):
+            SyncBackupsSheet(ruleID: ruleID)
         }
     }
 }

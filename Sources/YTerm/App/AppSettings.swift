@@ -10,6 +10,7 @@ enum SettingsKey {
     static let showHiddenFiles = "showHiddenFiles"
     static let editorAppPath = "editorAppPath"
     static let preferredIDE = "preferredIDE"
+    static let syncBackupRetentionDays = "syncBackupRetentionDays"
 }
 
 enum AppSettings {
@@ -22,6 +23,7 @@ enum AppSettings {
             SettingsKey.maxConcurrentTransfers: 2,
             SettingsKey.compress: false,
             SettingsKey.showHiddenFiles: false,
+            SettingsKey.syncBackupRetentionDays: 30,
         ])
     }
 
@@ -33,6 +35,9 @@ enum AppSettings {
     static var editorAppPath: String { defaults.string(forKey: SettingsKey.editorAppPath) ?? "" }
     /// nil = automatic (first installed editor).
     static var preferredIDE: IDEKind? { IDEKind(rawValue: defaults.string(forKey: SettingsKey.preferredIDE) ?? "") }
+
+    /// Two-way sync backups older than this are deleted automatically; 0 keeps them forever.
+    static var syncBackupRetentionDays: Int { max(0, defaults.integer(forKey: SettingsKey.syncBackupRetentionDays)) }
 
     static var maxConcurrentTransfers: Int {
         let value = defaults.integer(forKey: SettingsKey.maxConcurrentTransfers)

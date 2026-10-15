@@ -146,8 +146,6 @@ final class SyncSession:  Identifiable {
     var remoteWatchNote: String?
     var lastSummary: String?
     var conflicts: [TwoWayConflict] = []
-    var localBackupDirectory: String?
-    var remoteBackupDirectory: String?
     /// Checksum of the remote listing after the last pass; a poll that differs triggers a pass.
     var remoteFingerprint: String?
 
@@ -212,6 +210,7 @@ final class SyncManager {
     @ObservationIgnored var debounceInterval: Duration = .seconds(1)
     /// Hosts already asked about installing inotify-tools in this run.
     @ObservationIgnored var promptedProfiles: Set<UUID> = []
+    @ObservationIgnored private var backupCleanupTask: Task<Void, Never>?
 
     private let fileURL: URL
 
@@ -226,6 +225,13 @@ final class SyncManager {
     func activate() {
         for session in sessions where session.rule.enabled {
             startWatching(session)
+        }
+        // Expired backups go at launch and every few hours while the app stays open.
+        backupCleanupTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.pruneExpiredBackups()
+                try? await Task.sleep(for: .seconds(6 * 3600))
+            }
         }
     }
 
@@ -393,6 +399,9 @@ final class SyncManager {
     }
 
     func connectionDidOpen(profileID: UUID) {
+        if let cutoff = SyncBackups.cutoff(retentionDays: AppSettings.syncBackupRetentionDays), hasTwoWayRule(on: profileID) {
+            Task { await pruneRemoteBackups(profileID: profileID, before: cutoff) }
+        }
         for session in sessions where session.rule.enabled && session.rule.profileID == profileID {
             session.inotifyFailures = 0
             startRemoteWatching(session)
@@ -437,7 +446,7 @@ extension SyncManager {
             localRoot: rule.localPath,
             remoteRoot: rule.remotePath,
             excludes: SyncExcludes(AppSettings.excludes + extraExcludes),
-            backupName: String(rule.id.uuidString.prefix(8)),
+            backupName: SyncBackups.folderName(for: rule.id),
             transfer: { [weak app] direction, listFile, backupDirectory in
                 guard let app else { throw CancellationError() }
                 // Same layout as the push and pull-review transfers: contents of one root into the other.
@@ -489,8 +498,6 @@ extension SyncManager {
                 if !plan.conflicts.isEmpty {
                     session.conflicts = Array((plan.conflicts + session.conflicts).prefix(50))
                 }
-                if let directory = outcome.localBackupDirectory { session.localBackupDirectory = directory }
-                if let directory = outcome.remoteBackupDirectory { session.remoteBackupDirectory = directory }
                 // Converge when something changed mid-pass, but never loop forever.
                 if outcome.needsAnotherPass, session.extraPasses < 3 {
                     session.extraPasses += 1
@@ -658,5 +665,62 @@ extension SyncManager {
     func canInstallInotify(profileID: UUID) -> Bool {
         guard let connection = app?.connections[profileID] else { return false }
         return !connection.info.has("inotifywait") && InotifySupport.packageManager(for: connection.info) != nil
+    }
+}
+
+// MARK: - Backups
+
+extension SyncManager {
+    func hasTwoWayRule(on profileID: UUID) -> Bool {
+        sessions.contains { $0.rule.mode == .twoWay && $0.rule.profileID == profileID }
+    }
+
+    /// Deletes backups older than the retention setting, locally and on connected two-way hosts.
+    func pruneExpiredBackups() async {
+        guard let cutoff = SyncBackups.cutoff(retentionDays: AppSettings.syncBackupRetentionDays) else { return }
+        await pruneBackups(before: cutoff)
+    }
+
+    /// Local backups always; remote ones on hosts that are connected right now. Returns the number
+    /// of removed snapshots on each side.
+    @discardableResult
+    func pruneBackups(before cutoff: String, ruleID: UUID? = nil) async -> (local: Int, remote: Int) {
+        let folder = ruleID.map(SyncBackups.folderName(for:))
+        let local = await Task.detached(priority: .utility) {
+            SyncBackups.pruneLocal(before: cutoff, ruleFolder: folder)
+        }.value
+        var remote = 0
+        let profileIDs: Set<UUID>
+        if let ruleID, let profileID = session(ruleID)?.rule.profileID {
+            profileIDs = [profileID]
+        } else {
+            profileIDs = Set(sessions.filter { $0.rule.mode == .twoWay }.compactMap(\.rule.profileID))
+        }
+        for profileID in profileIDs {
+            remote += await pruneRemoteBackups(profileID: profileID, before: cutoff, ruleFolder: folder)
+        }
+        return (local, remote)
+    }
+
+    @discardableResult
+    func pruneRemoteBackups(profileID: UUID, before cutoff: String, ruleFolder: String? = nil) async -> Int {
+        guard let connection = app?.connections[profileID] else { return 0 }
+        let script = SyncBackups.remotePruneScript(home: connection.info.home, before: cutoff, ruleFolder: ruleFolder)
+        guard let result = try? await connection.run(script), result.succeeded else { return 0 }
+        return Int(result.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    }
+
+    /// Backup usage of one rule; `remote` is nil when its host is not connected.
+    func backupUsage(ruleID: UUID) async -> (local: SyncBackups.Usage, remote: SyncBackups.Usage?) {
+        let folder = SyncBackups.folderName(for: ruleID)
+        let local = await Task.detached(priority: .utility) { SyncBackups.localUsage(ruleFolder: folder) }.value
+        guard let profileID = session(ruleID)?.rule.profileID, let connection = app?.connections[profileID] else {
+            return (local, nil)
+        }
+        let script = SyncBackups.remoteUsageScript(home: connection.info.home, ruleFolder: folder)
+        guard let result = try? await connection.run(script, stdin: nil, onStdout: nil, onStderr: nil, log: false), result.succeeded else {
+            return (local, nil)
+        }
+        return (local, SyncBackups.parseRemoteUsage(result.stdoutText))
     }
 }
